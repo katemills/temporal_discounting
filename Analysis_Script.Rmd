@@ -1,0 +1,1470 @@
+---
+title: "Temporal_Discounting_Analysis"
+author: "Kate & Jeya"
+date: "January 27, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load Required Packages and set fixed settings
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+packages <- c("R.matlab", "lme4", "R.utils", "R.oo", "nlme", "ggplot2", "zoo",
+              "dplyr", "tidyr", "knitr", "parallel", "data.table", "lubridate")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, library, character.only = TRUE)
+
+invlogit <- function(x){
+  exp(x)/(exp(x)+1)
+}
+
+ctrl <- lmeControl(opt='optim')
+options(scipen=999)
+scrubbingThreshold=.2
+coialpha=.01
+samp2alpha=.05
+numcores=detectCores(1)
+```
+
+Load Data
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Load the list of participants who were watching movies
+moviegoers<-read.csv(paste0(getwd(),"/../QC/moviegoers.txt"),header=F)$V1
+
+# Read in data participant information
+sub_info_kate<-read.csv(paste0(getwd(),"/../data/sublist.csv"),header = FALSE) %>%
+  rename(famid = V1, sibid = V2, scandate = V3,
+         subproc = V4, subage = V5, subsex= V6,
+         subiq = V7, subgroup = V9) %>%
+  mutate(scanid=paste0(famid,"-",sibid,scandate), subid=paste0(famid,"-",sibid),
+         ADHDID=paste0(famid,sibid), interval=paste0("/group_shares/FAIR_HCP/HCP/processed/ADHD-HumanYouth-OHSU/",subid,"/",scandate,subproc))
+
+# Read in behavioral data
+behavior_info<-read.csv(paste0(getwd(),"/../data/TemporalDiscounting.csv")) %>%
+  filter(AUC!=-777, pow.Frames>119) %>%
+  mutate(famid=paste0(substr(ADHDID,1,5)),
+         sibid=paste0(substr(ADHDID,6,6)),
+         subid=paste0(famid,"-",sibid),
+         scanid=paste0(subid,MRIvisit_yyyymmdd)) %>%
+merge(as.data.table(select(sub_info_kate,scanid,subsex,subiq,subgroup,interval)),by.x="scanid",by.y="scanid")
+rm(sub_info_kate)
+behavior_info2<-read.csv(paste0(getwd(),"/../data/TemporalDiscounting.csv")) %>%
+  filter(AUC!=-777, pow.Frames>119) %>%
+  filter(!Processed_Pathfile %in% behavior_info$Processed_Pathfile) %>%
+  mutate(famid=paste0(substr(ADHDID,1,5)),
+         sibid=paste0(substr(ADHDID,6,6)),
+         subid=paste0(famid,"-",sibid),
+         scanid=paste0(subid,MRIvisit_yyyymmdd))
+
+behavior_info<-bind_rows(behavior_info, behavior_info2)
+behavior_info<-behavior_info %>% mutate(AUC=abs(AUC)) %>% filter(!scanid %in% moviegoers)
+rm(behavior_info2)
+
+## Sample 1: Participants with 2+ timepoints, good scans only, valid temp. discounting data at all time points
+load(paste0(getwd(),"/../data/Sample1.RData")) # Load data
+
+## Cut down dataframe with just behavioural data first
+sample1_cutdown <- merge(as.data.table(filter(desikan_coisDT_sample1,
+                                               coi==desikan_coisDT_sample1$coi[1])),
+                          filter(behavior_info,
+                                 scanid %in% desikan_coisDT_sample1$subscan),
+                          by.x='subscan',
+                          by.y='scanid',
+                          allow.cartesian=T)
+
+## Sample 2: Participants with 1 timepoints, good scans only, valid temp. discounting data
+load(paste0(getwd(),"/../data/Sample2.RData")) # Load data
+
+## Cut down dataframe with just behavioural data first
+sample2_cutdown <- merge(as.data.table(filter(desikan_coisDT_sample2,
+                                               coi==desikan_coisDT_sample2$coi[1])),
+                          filter(behavior_info,
+                                 scanid %in% desikan_coisDT_sample2$subscan),
+                          by.x='subscan',
+                          by.y='scanid',
+                          allow.cartesian=T)
+```
+
+Center age variable
+```{r}
+## Make age centered variable ##
+# Check out why: http://www.theanalysisfactor.com/center-on-the-mean/
+
+## Sample 1
+sample1_cutdown$MRIagecent<-((sample1_cutdown$MRI_Age)-(mean(sample1_cutdown$MRI_Age)))
+sample1_cutdown$MRIagecentsq<-(sample1_cutdown$MRIagecent*sample1_cutdown$MRIagecent)
+sample1_cutdown$MRIagecentcu<-(sample1_cutdown$MRIagecent*sample1_cutdown$MRIagecent*sample1_cutdown$MRIagecent)
+
+sample1_cutdown$AUCagecent<-((sample1_cutdown$Discounting_Age)-(mean(sample1_cutdown$Discounting_Age)))
+sample1_cutdown$AUCagecentsq<-(sample1_cutdown$AUCagecent*sample1_cutdown$AUCagecent)
+sample1_cutdown$AUCagecentcu<-(sample1_cutdown$AUCagecent*sample1_cutdown$AUCagecent*sample1_cutdown$AUCagecent)
+
+
+## Sample 2
+sample2_cutdown$MRIagecent<-((sample2_cutdown$MRI_Age)-(mean(sample2_cutdown$MRI_Age)))
+sample2_cutdown$MRIagecentsq<-(sample2_cutdown$MRIagecent*sample2_cutdown$MRIagecent)
+sample2_cutdown$MRIagecentcu<-(sample2_cutdown$MRIagecent*sample2_cutdown$MRIagecent*sample2_cutdown$MRIagecent)
+
+sample2_cutdown$AUCagecent<-((sample2_cutdown$Discounting_Age)-(mean(sample2_cutdown$Discounting_Age)))
+sample2_cutdown$AUCagecentsq<-(sample2_cutdown$AUCagecent*sample2_cutdown$AUCagecent)
+sample2_cutdown$AUCagecentcu<-(sample2_cutdown$AUCagecent*sample2_cutdown$AUCagecent*sample2_cutdown$AUCagecent)
+
+```
+
+
+Run age models for AUC
+```{r}
+### SAMPLE 1 ########
+## Run age only models 
+nullAUCmodel=(lme(AUC ~ 1, method="ML", random = ~1|subid, data=sample1_cutdown))
+linAUCmodel=(lme(AUC ~ AUCagecent, method="ML", random = ~1|subid, data=sample1_cutdown))
+quadAUCmodel=(lme(AUC ~ AUCagecent+AUCagecentsq, method="ML", random = ~1|subid, data=sample1_cutdown))
+cubAUCmodel=(lme(AUC ~ AUCagecent+AUCagecentsq+AUCagecentcu, method="ML", random = ~1|subid, data=sample1_cutdown))
+agepredictAUCtable<-anova(nullAUCmodel,linAUCmodel,quadAUCmodel,cubAUCmodel)
+agepredictAUCtable2<-anova(linAUCmodel,cubAUCmodel)
+if (agepredictAUCtable$'p-value'[4]<.05 & agepredictAUCtable2$'p-value'[2]<.05 & agepredictAUCtable$AIC[4]<agepredictAUCtable$AIC[3]
+    & agepredictAUCtable$AIC[4]<agepredictAUCtable$AIC[2] & agepredictAUCtable$AIC[4]<agepredictAUCtable$AIC[1]){
+  bestAUCagemodel<-cubAUCmodel
+  AUCLRstats<-anova(nullAUCmodel,cubAUCmodel)
+} else if (agepredictAUCtable$'p-value'[3]<.05 & agepredictAUCtable$AIC[3]<agepredictAUCtable$AIC[2]
+           & agepredictAUCtable$AIC[3]<agepredictAUCtable$AIC[1]){
+  bestAUCagemodel<-quadAUCmodel
+  AUCLRstats<-anova(nullAUCmodel,quadAUCmodel)
+} else if (agepredictAUCtable$'p-value'[2]<.05 & agepredictAUCtable$AIC[2]<agepredictAUCtable$AIC[1]){
+  bestAUCagemodel<-linAUCmodel
+  AUCLRstats<-anova(nullAUCmodel,linAUCmodel)
+  } else
+    bestAUCagemodel<-paste0("nothing")
+
+## Report age model comparisons ##
+agepredictAUCtable
+
+## Report LR stats (Results) ##
+AUCLRstats
+
+## Report fixed effects for best fitting model ##
+summary(bestAUCagemodel)
+
+
+
+##################
+### SAMPLE 2 #####
+
+## Run age only models
+nullAUCmodel=(lm(AUC ~ 1, data=sample2_cutdown))
+linAUCmodel=(lm(AUC ~ AUCagecent, data=sample2_cutdown))
+quadAUCmodel=(lm(AUC ~ AUCagecent+AUCagecentsq, data=sample2_cutdown))
+cubAUCmodel=(lm(AUC ~ AUCagecent+AUCagecentsq+AUCagecentcu, data=sample2_cutdown))
+agepredictAUCtable<-anova(nullAUCmodel,linAUCmodel,quadAUCmodel,cubAUCmodel,test="F")
+agepredictAUCtable2<-anova(linAUCmodel,cubAUCmodel,test="F")
+if (agepredictAUCtable$'Pr(>F)'[4]<.05 & agepredictAUCtable2$'Pr(>F)'[2]<.05){
+  bestAUCagemodel_sample2<-cubAUCmodel
+  AUCFtest<-anova(nullAUCmodel,cubAUCmodel,test="F")
+} else if (agepredictAUCtable$'Pr(>F)'[3]<.05){
+  bestAUCagemodel_sample2<-quadAUCmodel
+  AUCFtest<-anova(nullAUCmodel,quadAUCmodel,test="F")
+} else if (agepredictAUCtable$'Pr(>F)'[2]<.05){
+  bestAUCagemodel_sample2<-linAUCmodel
+  AUCFtest<-anova(nullAUCmodel,linAUCmodel,test="F")
+} else
+  bestAUCagemodel_sample2<-paste0("nothing")
+
+## Report age model comparisons ##
+agepredictAUCtable
+
+## Report F test stats (Results) ##
+AUCFtest
+
+## Report fixed effects for best fitting model  ##
+anova(bestAUCagemodel_sample2)
+summary(bestAUCagemodel_sample2)
+
+```
+
+Plot AUC by Age best fitting model (Figure 1)
+```{r}
+  AUCagecent<-round(seq(min(sample1_cutdown$AUCagecent,na.rm = TRUE),
+                        max(sample1_cutdown$AUCagecent,na.rm = TRUE),by=.1),
+                    2)
+  AUCagecentsq=AUCagecent*AUCagecent
+  AUCagecentcu=AUCagecent*AUCagecent*AUCagecent
+  data.pred = cbind.data.frame(AUCagecent,AUCagecentsq,AUCagecentcu)
+  data.pred$Discounting_Age<-(data.pred$AUCagecent+mean(sample1_cutdown$Discounting_Age))
+  y.pred = predict(bestAUCagemodel,
+                   data.pred,
+                   level=0)
+  data.pred = cbind.data.frame(data.pred,
+                               y.pred)
+  scale = 1.96
+  designmat<-model.matrix(eval(eval(bestAUCagemodel$call$fixed)[-2]),
+                          data.pred[-3]) #make design matrix
+  SDvalue<-sqrt(diag(designmat %*% bestAUCagemodel$varFix %*% t(designmat))) #calculate standard deviation for each point for each model
+  y.lower<-y.pred-(scale*SDvalue) #calculate confidence intervals - lower
+  y.upper<-y.pred+(scale*SDvalue) #calculate confidence intervals - upper
+  data.pred = cbind.data.frame(data.pred,
+                               y.lower,
+                               y.upper)
+  data.pred$AUC<-data.pred$y.pred
+
+  # Graph it
+  AUCAge<-ggplot(data=sample1_cutdown,
+                         aes(x=Discounting_Age,
+                               y=AUC))+
+    xlim(7,16)+
+    xlab("Age (years)")+
+    ylim(0,1)+
+    ylab("Temporal Discounting AUC")+
+    geom_line(data=data.pred,
+              aes(x=Discounting_Age, y=AUC), size=.7, colour="forestgreen")+
+    geom_ribbon(data=data.pred,
+                aes(ymin=y.lower, ymax=y.upper), alpha=0.2, fill="forestgreen")+
+    geom_line(data=sample1_cutdown,
+              aes(group=subid),size=.3,alpha=0.3,colour="forestgreen")+
+    geom_point(data=sample1_cutdown,
+               aes(group=subid),size=2,alpha=0.3,colour="forestgreen")+
+    geom_point(data=sample2_cutdown,
+               size=2,
+               alpha=0.3,
+               colour="dodgerblue") +
+    geom_smooth(data=sample2_cutdown,
+                method=lm,
+                aes(x=Discounting_Age,
+                    y=AUC),
+                size=.7,
+                alpha=0.2,
+                colour="dodgerblue",
+                fill = "dodgerblue") +
+    theme_bw() +
+    theme_minimal(base_size = 12, base_family = "Arial") +
+    theme(axis.line = element_line(colour = "black"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          legend.position="none")
+  AUCAge
+  ggsave(filename=paste0(getwd(),"/../graphs/AUCbyage.png"), plot=AUCAge, width=6, height=5, units='in', dpi=300)
+```
+
+Analyze effect of COI on AUC
+```{r}
+desikan_cois<-distinct(desikan_coisDT_sample1, coi)
+
+coiModComparison <- function(coi_name, bdata, coidata){
+  bdata<-bdata  %>% 
+    select(-cor, -coi, -networks)
+  adf<-merge(as.data.table(filter(coidata,coi==coi_name)),
+             bdata,
+             by.x='subscan',
+             by.y='subscan',
+             allow.cartesian=T)
+  nullmod <- lmer(as.formula("AUC ~ 1 +(1|subid)"), REML = FALSE, adf)
+  agemod <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq +(1|subid)"), REML = FALSE, adf)
+  coionly <- lmer(as.formula("AUC ~ cor +(1|subid)"), REML = FALSE, adf)
+  coimain <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq + cor +(1|subid)"), REML = FALSE, adf)
+  coilinint <- lmer(as.formula("AUC ~ AUCagecent * cor + AUCagecentsq +(1|subid)"), REML = FALSE, adf)
+  coiquadint <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq * cor +(1|subid)"), REML = FALSE, adf)
+  coiint <- lmer(as.formula("AUC ~ AUCagecent * cor + AUCagecentsq * cor +(1|subid)"), REML = FALSE, adf)
+  
+  # Begin the loop of comparisons!
+  modcomp1<-anova(agemod,coimain,coilinint,coiquadint,coiint)
+  modcomp2<-anova(coimain,coiquadint)
+  modcomp3<-anova(agemod,coiquadint)
+  modcomp4<-anova(coilinint,coiint)
+  modcomp5<-anova(coimain,coiint)
+  modcomp6<-anova(agemod,coiint)
+  modcomp7<-anova(agemod,coilinint)
+  if (modcomp1$`Pr(>Chisq)`[5]<coialpha
+      & modcomp4$`Pr(>Chisq)`[2]<coialpha
+      & modcomp5$`Pr(>Chisq)`[2]<coialpha
+      & modcomp6$`Pr(>Chisq)`[2]<coialpha
+      & modcomp1$AIC[5]<modcomp1$AIC[4]
+      & modcomp1$AIC[5]<modcomp1$AIC[3]
+      & modcomp1$AIC[5]<modcomp1$AIC[2]
+      & modcomp1$AIC[5]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coiint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modcomparison<-modcomp6
+      coimodel<-coiint
+    } else {
+      include=1
+      modcomparison<-coivsagecoi 
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[4]<coialpha
+             & modcomp2$`Pr(>Chisq)`[2]<coialpha
+             & modcomp3$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[4]<modcomp1$AIC[3]
+             & modcomp1$AIC[4]<modcomp1$AIC[2]
+             & modcomp1$AIC[4]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coiquadint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modcomparison<-modcomp3
+      coimodel<-coiquadint
+    } else {
+      include=1
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[3]<coialpha
+             & modcomp7$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[3]<modcomp1$AIC[2]
+             & modcomp1$AIC[3]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coilinint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modcomparison<-modcomp7
+      coimodel<-coilinint
+    } else {
+      include=1
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[2]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coimain)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modcomparison<-anova(agemod,coimain)
+      coimodel<-coimain
+    } else {
+      include=1
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else 
+    coivsagecoi<-anova(coionly,agemod)
+  if (!exists("include")){
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=0
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  }
+  if (include==1){
+    retDF <- as.data.frame(modcomparison[1,1:5]-modcomparison[2,1:5])
+    retDF$coi <- coi_name
+    retDF$chisq <- modcomparison[2,8]
+    retDF$mod <- list(coimodel)
+    as.data.table(retDF)
+  }
+}
+
+system.time(desikan_models<-mclapply(as.list(desikan_cois$coi), 
+                                     bdata=sample1_cutdown,
+                                     coidata=desikan_coisDT_sample1,
+                                     mc.cores=numcores,
+                                     FUN=coiModComparison))
+
+print(object.size(desikan_models), units='Mb')
+desikan_modelsDT <- bind_rows(desikan_models) %>% filter(chisq != 1) %>% filter(chisq <=.015)
+print(object.size(desikan_modelsDT), units='Mb')
+save(desikan_modelsDT, file=paste0(getwd(),"/../data/desikan_modelsDT_sample1.Rda"))
+
+rm(desikan_models);gc()
+```
+
+Loop through the significant COIs and extract relevant model parameters
+```{r}
+load(file=paste0(getwd(),"/../data/desikan_modelsDT_sample1.Rda"))
+
+coiModComparison <- function(coi_name, bdata, coidata){
+  bdata<-bdata %>% select(-cor, -coi, -networks)
+  adf<-merge(as.data.table(filter(coidata,coi==coi_name)),
+             bdata,
+             by.x='subscan',
+             by.y='subscan',
+             allow.cartesian=T)
+  nullmod <- lmer(as.formula("AUC ~ 1 +(1|subid)"), REML = FALSE, adf)
+  agemod <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq +(1|subid)"), REML = FALSE, adf)
+  coionly <- lmer(as.formula("AUC ~ cor +(1|subid)"), REML = FALSE, adf)
+  coimain <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq + cor +(1|subid)"), REML = FALSE, adf)
+  coilinint <- lmer(as.formula("AUC ~ AUCagecent * cor + AUCagecentsq +(1|subid)"), REML = FALSE, adf)
+  coiquadint <- lmer(as.formula("AUC ~ AUCagecent + AUCagecentsq * cor +(1|subid)"), REML = FALSE, adf)
+  coiint <- lmer(as.formula("AUC ~ AUCagecent * cor + AUCagecentsq * cor +(1|subid)"), REML = FALSE, adf)
+  
+  #Begin the loop of comparisons!
+  modcomp1<-anova(agemod,coimain,coilinint,coiquadint,coiint)
+  modcomp2<-anova(coimain,coiquadint)
+  modcomp3<-anova(agemod,coiquadint)
+  modcomp4<-anova(coilinint,coiint)
+  modcomp5<-anova(coimain,coiint)
+  modcomp6<-anova(agemod,coiint)
+  modcomp7<-anova(agemod,coilinint)
+  if (modcomp1$`Pr(>Chisq)`[5]<coialpha
+      & modcomp4$`Pr(>Chisq)`[2]<coialpha
+      & modcomp5$`Pr(>Chisq)`[2]<coialpha
+      & modcomp6$`Pr(>Chisq)`[2]<coialpha
+      & modcomp1$AIC[5]<modcomp1$AIC[4]
+      & modcomp1$AIC[5]<modcomp1$AIC[3]
+      & modcomp1$AIC[5]<modcomp1$AIC[2]
+      & modcomp1$AIC[5]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coiint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modtype="full interaction"
+      modcomparison<-modcomp6
+      coimodel<-coiint
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi 
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[4]<coialpha
+             & modcomp2$`Pr(>Chisq)`[2]<coialpha
+             & modcomp3$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[4]<modcomp1$AIC[3]
+             & modcomp1$AIC[4]<modcomp1$AIC[2]
+             & modcomp1$AIC[4]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coiquadint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modtype="quadratic interaction"
+      modcomparison<-modcomp3
+      coimodel<-coiquadint
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[3]<coialpha
+             & modcomp7$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[3]<modcomp1$AIC[2]
+             & modcomp1$AIC[3]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coilinint)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modtype="linear interaction"
+      modcomparison<-modcomp7
+      coimodel<-coilinint
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>Chisq)`[2]<coialpha
+             & modcomp1$AIC[2]<modcomp1$AIC[1]){
+    coivsagecoi<-anova(coionly,coimain)
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=1
+      modtype="main effect"
+      modcomparison<-anova(agemod,coimain)
+      coimodel<-coimain
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  } else 
+    coivsagecoi<-anova(coionly,agemod)
+  if (!exists("include")){
+    if (coivsagecoi$`Pr(>Chisq)`[2]<coialpha
+        & coivsagecoi$AIC[2]<coivsagecoi$AIC[1]){
+      include=0
+    } else {
+      include=1
+      modtype="coionly"
+      modcomparison<-coivsagecoi
+      coimodel<-coionly
+    }
+  }
+  if(include==1){
+    compDF <- as.data.frame(modcomparison[1,1:5]-modcomparison[2,1:5])
+    compDF$chisq <- modcomparison[2,8]
+    coefsCOI <- as.data.frame(coef(summary(coimodel))[,c("Estimate","Std. Error")])
+    coefsCOI$term <- row.names(coefsCOI)
+    varCOI <- as.data.frame(VarCorr(coimodel)[[1]])
+    varCOI[upper.tri(varCOI)]<-NA
+    varCOI$var2 <- row.names(varCOI)
+    varCOI_l<-gather(varCOI, var1, value, -var2) %>% 
+      filter(!is.na(value)) %>%
+      mutate(param=ifelse(var2==var1, var1, paste(var1, var2, sep='_'))) %>%
+      select(param, value)
+    compDF_l<-gather(compDF, param, value)
+    coefsCOI_l<-gather(coefsCOI, param2, value, -term) %>% unite(param, term, param2)
+    retDF<-as.data.table(bind_rows(compDF_l, coefsCOI_l, varCOI_l))
+    networks<-adf$networks[1]
+    retDF$coi <- coi_name
+    retDF$networks <- networks
+    retDF$modtype <- modtype
+    retDF
+  }
+}
+
+system.time(desikan_models_tb<-mclapply(as.list(desikan_modelsDT$coi), 
+                                     bdata=sample1_cutdown,
+                                     coidata=desikan_coisDT_sample1,
+                                     mc.cores=numcores,
+                                     FUN=coiModComparison))
+
+print(object.size(desikan_models_tb), units='Mb')
+desikan_models_table <- bind_rows(desikan_models_tb)
+print(object.size(desikan_models_table), units='Mb')
+rm(desikan_models_tb);gc()
+save(desikan_models_table, file=paste0(getwd(),"/../data/desikan_models_table_sample1.RDA"))
+```
+
+Analyze effect of COI on AUC in replication sample (sample 2)
+```{r}
+load(file=paste0(getwd(),"/../data/desikan_models_table_sample1.RDA"))
+coiModComparison <- function(coi_name, bdata, coidata, mc.cores){
+  bdata2<-bdata %>% select(-cor, -coi, -networks)
+  adf<-merge(as.data.table(filter(coidata,coi==coi_name)),
+             bdata2,
+             by.x='subscan',
+             by.y='subscan',
+             allow.cartesian=T)
+  nullmod <- lm(as.formula("AUC ~ 1"), adf)
+  agemod <- lm(as.formula("AUC ~ AUCagecent"), adf)
+  coionly <- lm(as.formula("AUC ~ cor"), adf)
+  coimain <- lm(as.formula("AUC ~ AUCagecent + cor"), adf)
+  coilinint <- lm(as.formula("AUC ~ AUCagecent * cor"), adf)
+  #Begin the loop of comparisons!
+  modcomp1<-anova(agemod,coimain,coilinint,test="F")
+  modcomp2<-anova(agemod,coilinint,test="F")
+  if (modcomp1$`Pr(>F)`[3]<samp2alpha
+      & modcomp2$`Pr(>F)`[2]<samp2alpha){
+    coivsagecoi<-anova(coionly,coilinint,test="F")
+    if (coivsagecoi$`Pr(>F)`[2]<samp2alpha){
+      include=1
+      modtype="linear interaction"
+      modcomparison<-modcomp2
+      coimodel<-coilinint
+    } else {
+      include=1
+      modtype="coi only"
+      modcomparison<-anova(nullmod,coionly)
+      coimodel<-coionly
+    }
+  } else if (modcomp1$`Pr(>F)`[2]<samp2alpha){
+    coivsagecoi<-anova(coionly,coimain,test="F")
+    if (coivsagecoi$`Pr(>F)`[2]<samp2alpha){
+      include=1
+      modtype="main effect"
+      modcomparison<-anova(agemod,coimain,test="F")
+      coimodel<-coimain
+    } else {
+      include=1
+      modtype="coi only"
+      modcomparison<-anova(nullmod,coionly)
+      coimodel<-coionly
+    }
+  } else
+  if (!exists("include")){
+    agesum<-summary(agemod)
+    coisum<-summary(coionly)
+    if (agesum$adj.r.squared>coisum$adj.r.squared){
+      include=0
+    } else {
+      include=1
+      modtype="coi only"
+      modcomparison<-anova(nullmod,coionly)
+      coimodel<-coionly
+    }
+  }
+  if(include==1){
+    summarymod<-summary(coimodel)
+    compDF <- as.data.frame(modcomparison[2,1:6])
+    compDF$fstatval <- summarymod$fstatistic[1]
+    compDF$numdf <- summarymod$fstatistic[2]
+    compDF$dendf <- summarymod$fstatistic[3]
+    compDF$adjRsq <- summarymod$adj.r.squared
+    coefsCOI <- as.data.frame(coef(summary(coimodel))[,c("Estimate","Std. Error")])
+    coefsCOI$term <- row.names(coefsCOI)
+    compDF_l<-gather(compDF, param, value)
+    coefsCOI_l<-gather(coefsCOI, param2, value, -term) %>% unite(param, term, param2)
+    retDF<-as.data.table(bind_rows(compDF_l, coefsCOI_l))
+    networks<-adf$networks[1]
+    retDF$coi <- coi_name
+    retDF$networks <- networks
+    retDF$modtype <- modtype
+    retDF$param
+    retDF
+  }
+}
+
+
+system.time(desikan_models_tb_sample2<-mclapply(unique(desikan_models_table$coi),
+                                        bdata=sample2_cutdown,
+                                        coidata=desikan_coisDT_sample2,
+                                        mc.cores=numcores,
+                                        FUN=coiModComparison))
+
+print(object.size(desikan_models_tb_sample2), units='Mb')
+desikan_models_table_sample2 <- bind_rows(desikan_models_tb_sample2)
+print(object.size(desikan_models_table_sample2), units='Mb')
+rm(desikan_models_tb_sample2);gc()
+save(desikan_models_table_sample2, file=paste0(getwd(),"/../data/desikan_models_table_sample2.RDA"))
+```
+
+Make graphs for Sample 1
+```{r}
+load(file=paste0(getwd(),"/../data/desikan_models_table_sample1.RDA"))
+
+minsampleAUCcentAge<-round(min(sample1_cutdown$AUCagecent),3)
+maxsampleAUCcentAge<-round(max(sample1_cutdown$AUCagecent),3)
+AUCagecent=minsampleAUCcentAge:maxsampleAUCcentAge
+AUCagecentsq=AUCagecent*AUCagecent
+makegraphs=function(COI){
+  bdata<-sample1_cutdown %>%
+    select(-cor, -coi, -networks)
+  adf<-merge(as.data.table(filter(desikan_coisDT_sample1,coi==COI)),
+             bdata,
+             by.x='subscan',
+             by.y='subscan',
+             allow.cartesian=T)
+  coitable<-desikan_models_table %>%
+    filter(coi==as.character(COI))
+  if (coitable$modtype[1]=="linear interaction"){
+    plottingmodel<-(lme(as.formula(AUC ~ AUCagecent * cor + AUCagecentsq), method="ML", random = ~1|subid,
+                        data=adf,
+                        control=ctrl))
+    cor=seq((mean(adf$cor)-sd(adf$cor)),
+            (mean(adf$cor)+sd(adf$cor)),
+            length.out = 3)
+    assign(paste0("coi_graphs"),
+           lapply(X=cor,
+                  FUN=function(COR){
+             assign(paste0("frame",COR),
+                    data.frame(AUCagecent=AUCagecent,cor=COR,AUCagecentsq=AUCagecentsq))
+             assign(paste0("frame",COR,"predvalue"),
+                    predict(plottingmodel, get(paste0("frame",COR)), level=0))
+             assign(paste0("designmat",COR),
+                    model.matrix(eval(eval(plottingmodel$call$fixed)[-2]),
+                                 get(paste0("frame",COR))[-3]))
+             assign(paste0("frame",COR,"SDvalue"),
+                    sqrt(diag(get(paste0("designmat",COR)) 
+                              %*% plottingmodel$varFix 
+                              %*% t(get(paste0("designmat",COR)))))) 
+             assign("lowerCIvalue",
+                    (get(paste0("frame",COR,"predvalue"))-
+                       (1.96*get(paste0("frame",COR,"SDvalue")))))
+            assign("upperCIvalue",
+                   (get(paste0("frame",COR,"predvalue"))+
+                      (1.96*get(paste0("frame",COR,"SDvalue")))))
+             assign("Discounting_Age",
+                    (AUCagecent+mean(sample1_cutdown$Discounting_Age)))
+             assign("AUC",
+                    get(paste0("frame",COR,"predvalue")))
+             cbind(get(paste0("frame",COR)),
+                   AUC,
+                   upperCIvalue,
+                   lowerCIvalue,
+                   Discounting_Age)
+           }))
+    
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=Discounting_Age,
+                      y=AUC))+
+             xlim(round(min(sample1_cutdown$Discounting_Age),0),
+                  round(max(sample1_cutdown$Discounting_Age),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC)")+
+             xlab("Age")+
+             geom_line(data=adf,
+                       aes(group=subid),
+                       size=.2,
+                       alpha=0.25,
+                       colour="blue")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+           geom_line(data=as.data.frame(coi_graphs[[1]]),
+                     aes(x=Discounting_Age,
+                         y=AUC),
+                     size=.7,
+                     colour="dodgerblue") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[1]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="dodgerblue") +
+             geom_line(data=as.data.frame(coi_graphs[[2]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="purple") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[2]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="purple") +
+             geom_line(data=as.data.frame(coi_graphs[[3]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="deeppink") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[3]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="deeppink") +
+             
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+           get(paste0(COI,"_graph"))
+           ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph.png"),
+                   plot=get(paste0(COI,"_graph")),
+                   width=6, height=4, units='in', dpi=300)
+                
+  } else if (coitable$modtype[1]=="quadratic interaction"){
+    plottingmodel<-(lme(as.formula(AUC ~ AUCagecent + AUCagecentsq * cor),
+                        method="ML",
+                        random = ~1|subid,
+                        data=adf,
+                        control=ctrl))
+    cor=seq((mean(adf$cor)-sd(adf$cor)),
+            (mean(adf$cor)+sd(adf$cor)),
+            length.out = 3)
+    assign(paste0("coi_graphs"),
+           lapply(X=cor,
+                  FUN=function(COR){
+             assign(paste0("frame",COR),
+                    data.frame(AUCagecent=AUCagecent,cor=COR,AUCagecentsq=AUCagecentsq))
+             assign(paste0("frame",COR,"predvalue"),
+                    predict(plottingmodel, get(paste0("frame",COR)), level=0))
+             assign(paste0("designmat",COR),
+                    model.matrix(eval(eval(plottingmodel$call$fixed)[-2]),
+                                 get(paste0("frame",COR))[-3]))
+             assign(paste0("frame",COR,"SDvalue"),
+                    sqrt(diag(get(paste0("designmat",COR)) 
+                              %*% plottingmodel$varFix 
+                              %*% t(get(paste0("designmat",COR)))))) 
+             assign("lowerCIvalue",
+                    (get(paste0("frame",COR,"predvalue"))-
+                       (1.96*get(paste0("frame",COR,"SDvalue")))))
+            assign("upperCIvalue",
+                   (get(paste0("frame",COR,"predvalue"))+
+                      (1.96*get(paste0("frame",COR,"SDvalue")))))
+             assign("Discounting_Age",
+                    (AUCagecent+mean(sample1_cutdown$Discounting_Age)))
+             assign("AUC",
+                    get(paste0("frame",COR,"predvalue")))
+             cbind(get(paste0("frame",COR)),
+                   AUC,
+                   upperCIvalue,
+                   lowerCIvalue,
+                   Discounting_Age)
+           }))
+    
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=Discounting_Age,
+                      y=AUC))+
+             xlim(round(min(sample1_cutdown$Discounting_Age),0),
+                  round(max(sample1_cutdown$Discounting_Age),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC)")+
+             xlab("Age")+
+             geom_line(data=adf,
+                       aes(group=subid),
+                       size=.2,
+                       alpha=0.25,
+                       colour="blue")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+           geom_line(data=as.data.frame(coi_graphs[[1]]),
+                     aes(x=Discounting_Age,
+                         y=AUC),
+                     size=.7,
+                     colour="dodgerblue") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[1]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="dodgerblue") +
+             geom_line(data=as.data.frame(coi_graphs[[2]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="purple") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[2]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="purple") +
+             geom_line(data=as.data.frame(coi_graphs[[3]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="deeppink") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[3]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="deeppink") +
+             
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+           get(paste0(COI,"_graph"))
+           ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph.png"),
+                   plot=get(paste0(COI,"_graph")),
+                   width=6, height=4, units='in', dpi=300)
+           
+  } else if (coitable$modtype[1]=="main effect"){
+    plottingmodel<-(lme(as.formula(AUC ~ AUCagecent + AUCagecentsq + cor),
+                        method="ML",
+                        random = ~1|subid,
+                        data=adf,
+                        control=ctrl))
+    cor=seq((mean(adf$cor)-sd(adf$cor)),
+            (mean(adf$cor)+sd(adf$cor)),
+            length.out = 3)
+    assign(paste0("coi_graphs"),
+           lapply(X=cor,
+                  FUN=function(COR){
+             assign(paste0("frame",COR),
+                    data.frame(AUCagecent=AUCagecent,cor=COR,AUCagecentsq=AUCagecentsq))
+             assign(paste0("frame",COR,"predvalue"),
+                    predict(plottingmodel, get(paste0("frame",COR)), level=0))
+             assign(paste0("designmat",COR),
+                    model.matrix(eval(eval(plottingmodel$call$fixed)[-2]),
+                                 get(paste0("frame",COR))[-3]))
+             assign(paste0("frame",COR,"SDvalue"),
+                    sqrt(diag(get(paste0("designmat",COR)) 
+                              %*% plottingmodel$varFix 
+                              %*% t(get(paste0("designmat",COR)))))) 
+             assign("lowerCIvalue",
+                    (get(paste0("frame",COR,"predvalue"))-
+                       (1.96*get(paste0("frame",COR,"SDvalue")))))
+            assign("upperCIvalue",
+                   (get(paste0("frame",COR,"predvalue"))+
+                      (1.96*get(paste0("frame",COR,"SDvalue")))))
+             assign("Discounting_Age",
+                    (AUCagecent+mean(sample1_cutdown$Discounting_Age)))
+             assign("AUC",
+                    get(paste0("frame",COR,"predvalue")))
+             cbind(get(paste0("frame",COR)),
+                   AUC,
+                   upperCIvalue,
+                   lowerCIvalue,
+                   Discounting_Age)
+           }))
+    
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=Discounting_Age,
+                      y=AUC))+
+             xlim(round(min(sample1_cutdown$Discounting_Age),0),
+                  round(max(sample1_cutdown$Discounting_Age),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC)")+
+             xlab("Age")+
+             geom_line(data=adf,
+                       aes(group=subid),
+                       size=.2,
+                       alpha=0.25,
+                       colour="blue")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+           geom_line(data=as.data.frame(coi_graphs[[1]]),
+                     aes(x=Discounting_Age,
+                         y=AUC),
+                     size=.7,
+                     colour="dodgerblue") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[1]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="dodgerblue") +
+             geom_line(data=as.data.frame(coi_graphs[[2]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="purple") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[2]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="purple") +
+             geom_line(data=as.data.frame(coi_graphs[[3]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="deeppink") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[3]]),
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="deeppink") +
+             
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+           get(paste0(COI,"_graph"))
+           ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph.png"),
+                   plot=get(paste0(COI,"_graph")),
+                   width=6, height=4, units='in', dpi=300)
+           
+  } else if (coitable$modtype[1]=="coionly"){
+    plottingmodel<-(lme(as.formula(AUC ~ cor),
+                        method="ML",
+                        random = ~1|subid,
+                        data=adf,
+                        control=ctrl))
+    mincor<-min(adf$cor)
+    maxcor<-max(adf$cor)
+    cor=seq(mincor,maxcor,length.out = 10)
+    assign(paste0("frame",COI),
+           data.frame(cor=cor))
+    assign(paste0("frame",COI,"predvalue"),
+           predict(plottingmodel, get(paste0("frame",COI)), level=0))
+    assign(paste0("designmat",COI),
+           model.matrix(eval(eval(plottingmodel$call$fixed)[-2]),
+                        get(paste0("frame",COI))[-3]))
+    assign(paste0("frame",COI,"SDvalue"),
+           sqrt(diag(get(paste0("designmat",COI)) 
+                     %*% plottingmodel$varFix 
+                     %*% t(get(paste0("designmat",COI)))))) 
+    assign("lowerCIvalue",
+           (get(paste0("frame",COI,"predvalue"))-
+              (1.96*get(paste0("frame",COI,"SDvalue")))))
+    assign("upperCIvalue",
+           (get(paste0("frame",COI,"predvalue"))+
+              (1.96*get(paste0("frame",COI,"SDvalue")))))
+    assign("AUC",
+           get(paste0("frame",COI,"predvalue")))
+    coi_graph<-cbind(get(paste0("frame",COI)),
+          AUC,
+          upperCIvalue,
+          lowerCIvalue)
+    
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=cor,
+                      y=AUC))+
+             xlim(round(min(adf$cor),0),
+                  round(max(adf$cor),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC")+
+             xlab("Connectivity strength")+
+             geom_line(data=adf,
+                       aes(group=subid),
+                       size=.2,
+                       alpha=0.25,
+                       colour="blue")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+           geom_line(data=coi_graph,
+                     aes(x=cor,
+                         y=AUC),
+                     size=.7,
+                     colour="dodgerblue") +
+             geom_ribbon(data=coi_graph,
+                         aes(ymin=lowerCIvalue,
+                             ymax=upperCIvalue),
+                         alpha=0.2, fill="dodgerblue")+
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+           get(paste0(COI,"_graph"))
+           ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph.png"),
+                   plot=get(paste0(COI,"_graph")),
+                   width=6, height=4, units='in', dpi=300)
+  }
+}
+
+lapply(X = as.list(as.character(unique(desikan_models_table$coi))),
+       FUN = makegraphs)
+
+```
+
+Make graphs for Sample 2
+```{r}
+load(file=paste0(getwd(),"/../data/desikan_models_table_sample2.RDA"))
+
+minsampleAUCcentAge<-round(min(sample2_cutdown$AUCagecent),3)
+maxsampleAUCcentAge<-round(max(sample2_cutdown$AUCagecent),3)
+AUCagecent=minsampleAUCcentAge:maxsampleAUCcentAge
+makegraphs=function(COI){
+  bdata<-sample2_cutdown %>%
+    select(-cor, -coi, -networks)
+  adf<-merge(as.data.table(filter(desikan_coisDT_sample2,coi==COI)),
+             bdata,
+             by.x='subscan',
+             by.y='subscan',
+             allow.cartesian=T)
+  coitable<-desikan_models_table_sample2 %>%
+    filter(coi==as.character(COI))
+  if (coitable$modtype[1]=="main effect"){
+    plottingmodel<-(lm(as.formula("AUC ~ AUCagecent + cor"), adf))
+    cor=seq((round(mean(adf$cor)-sd(adf$cor),3)),
+            (round(mean(adf$cor)+sd(adf$cor),3)),
+            length.out = 3)
+    assign(paste0("coi_graphs"),
+           lapply(X=cor,
+                  FUN=function(COR){
+                    assign(paste0("frame",COR),
+                           data.frame(AUCagecent=AUCagecent,cor=COR))
+                    assign(paste0("frame",COR),
+                           cbind(get(paste0("frame",COR)),
+                                 predict(plottingmodel, get(paste0("frame",COR)), interval = "confidence"))%>%
+                             mutate(Discounting_Age=(AUCagecent+mean(sample2_cutdown$Discounting_Age)),
+                                    AUC=fit))
+                  }))
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=Discounting_Age,
+                      y=AUC))+
+             xlim(round(min(sample2_cutdown$Discounting_Age),0),
+                  round(max(sample2_cutdown$Discounting_Age),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC)")+
+             xlab("Age")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+             geom_line(data=as.data.frame(coi_graphs[[1]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="dodgerblue") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[1]]),
+                         aes(ymin=lwr,
+                             ymax=upr),
+                         alpha=0.2, fill="dodgerblue") +
+             geom_line(data=as.data.frame(coi_graphs[[2]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="purple") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[2]]),
+                         aes(ymin=lwr,
+                             ymax=upr),
+                         alpha=0.2, fill="purple") +
+             geom_line(data=as.data.frame(coi_graphs[[3]]),
+                       aes(x=Discounting_Age,
+                           y=AUC),
+                       size=.7,
+                       colour="deeppink") +
+             geom_ribbon(data=as.data.frame(coi_graphs[[3]]),
+                         aes(ymin=lwr,
+                             ymax=upr),
+                         alpha=0.2, fill="deeppink") +
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+    get(paste0(COI,"_graph"))
+    ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph_sample2.png"),
+           plot=get(paste0(COI,"_graph")),
+           width=6, height=4, units='in', dpi=300)
+  } else if (coitable$modtype[1]=="coi only"){
+    plottingmodel<-(lm(as.formula("AUC ~ cor"), adf))
+    mincor<-min(adf$cor)
+    maxcor<-max(adf$cor)
+    cor=seq(mincor,maxcor,length.out = 7)
+    assign(paste0("frame",COI),
+           data.frame(AUCagecent=AUCagecent,cor=cor))
+    assign(paste0("frame",COI),
+           cbind(get(paste0("frame",COI)),
+                 predict(plottingmodel, get(paste0("frame",COI)), interval = "confidence"))%>%
+             mutate(AUC=fit))
+    
+    assign(paste0(COI,"_graph"),
+           ggplot(data=NULL,
+                  aes(x=cor,
+                      y=AUC))+
+             xlim(round(min(adf$cor),0),
+                  round(max(adf$cor),0)) +
+             ylim(0,1)+
+             ylab("Temporal Discounting (AUC")+
+             xlab("Connectivity strength")+
+             geom_line(data=adf,
+                       aes(group=subid),
+                       size=.2,
+                       alpha=0.25,
+                       colour="blue")+
+             geom_point(data=adf,
+                        aes(group=subid),
+                        size=1.5,
+                        alpha=0.25,
+                        colour="blue") +
+             geom_line(data=get(paste0("frame",COI)),
+                       aes(x=cor,
+                           y=AUC),
+                       size=.7,
+                       colour="dodgerblue") +
+             geom_ribbon(data=get(paste0("frame",COI)),
+                         aes(ymin=lwr,
+                             ymax=upr),
+                         alpha=0.2, fill="dodgerblue")+
+             theme_bw() +
+             theme_minimal(base_size = 12, base_family = "Arial") +
+             theme(axis.line.x = element_line(colour = "black", size=.5),
+                   axis.line.y = element_line(colour = "black", size=.5),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   panel.border = element_blank(),
+                   panel.background = element_blank(),
+                   legend.position="none"))
+    get(paste0(COI,"_graph"))
+    ggsave(filename=paste0(getwd(),"/../graphs/",COI,"_graph_sample2.png"),
+           plot=get(paste0(COI,"_graph")),
+           width=6, height=4, units='in', dpi=300)
+  }
+}
+  lapply(X = as.list(as.character(unique(desikan_models_table_sample2$coi))),
+         FUN = makegraphs)
+```
+
+Make results table for Sample 1
+```{r}
+param_labels_coionly <- {c(
+  "Df"="df",
+  "AIC"="AIC",
+  "BIC"="BIC",
+  "logLik"="logLik",
+  "deviance"="Chisq",
+  "chisq"="p ChiSq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "cor_Estimate"="Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "cor_Std. Error"="Connectivity SE",
+  "(Intercept)"="Intercept Random Effects Variable")}
+
+param_labels_maineffect <- {c(
+  "Df"="df",
+  "AIC"="AIC",
+  "BIC"="BIC",
+  "logLik"="logLik",
+  "deviance"="Chisq",
+  "chisq"="p ChiSq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "AUCagecent_Estimate"="Linear age Est",
+  "AUCagecentsq_Estimate"="Quadratic age Est",
+  "cor_Estimate"="Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "AUCagecent_Std. Error"="Linear age SE",
+  "AUCagecentsq_Std. Error"="Quadratic age SE",
+  "cor_Std. Error"="Connectivity SE",
+  "(Intercept)"="Intercept Random Effects Variable")}
+
+param_labels_linint <- {c(
+  "Df"="df",
+  "AIC"="AIC",
+  "BIC"="BIC",
+  "logLik"="logLik",
+  "deviance"="Chisq",
+  "chisq"="p ChiSq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "AUCagecent_Estimate"="Linear age Est",
+  "cor_Estimate"="Connectivity Est",
+  "AUCagecentsq_Estimate"="Quadratic age Est",
+  "AUCagecent:cor_Estimate"="Linear age X Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "AUCagecent_Std. Error"="Linear age SE",
+  "cor_Std. Error"="Connectivity SE",
+  "AUCagecentsq_Std. Error"="Quadratic age SE",
+  "AUCagecent:cor_Std. Error"="Linear age X Connectivity SE",
+  "(Intercept)"="Intercept Random Effects Variable")}
+
+param_labels_quadint <- {c(
+  "Df"="df",
+  "AIC"="AIC",
+  "BIC"="BIC",
+  "logLik"="logLik",
+  "deviance"="Chisq",
+  "chisq"="p ChiSq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "AUCagecent_Estimate"="Linear age Est",
+  "AUCagecentsq_Estimate"="Quadratic age Est",
+  "cor_Estimate"="Connectivity Est",
+  "AUCagecentsq:cor_Estimate"="Quadratic age X Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "AUCagecent_Std. Error"="Linear age SE",
+  "AUCagecentsq_Std. Error"="Quadratic age SE",
+  "cor_Std. Error"="Connectivity SE",
+  "AUCagecentsq:cor_Std. Error"="Quadratic age X Connectivity SE",
+  "(Intercept)"="Intercept Random Effects Variable")}
+
+coionly <- filter(desikan_models_table, modtype=="coionly") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_coionly)) %>%
+  spread(param,value) %>%
+  filter(round(`p ChiSq`,2)==.01) %>% select(-df, -BIC, -logLik) %>%
+  mutate(`p ChiSq`=round(`p ChiSq`,4),
+         AIC=round(AIC,2),
+         modtype="coi only",
+         df=-1,
+         Chisq=round(Chisq,2),
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Intercept Random Effects Variable`=round(`Intercept Random Effects Variable`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2))
+
+maineffect <-filter(desikan_models_table, modtype=="main effect") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_maineffect)) %>%
+  spread(param,value) %>% select(-df, -BIC, -logLik) %>%
+  mutate(`p ChiSq`=round(`p ChiSq`,4),
+         AIC=round(AIC,2),
+         df=1,
+         Chisq=round(Chisq,2),
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Intercept Random Effects Variable`=round(`Intercept Random Effects Variable`,2),
+         `Linear age Est`=round(`Linear age Est`,2),
+         `Linear age SE`=round(`Linear age SE`,2),
+         `Quadratic age Est`=round(`Quadratic age Est`,2),
+         `Quadratic age SE`=round(`Quadratic age SE`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2))
+
+linint <- filter(desikan_models_table, modtype=="linear interaction") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_linint)) %>%
+  spread(param,value) %>% select(-df, -BIC, -logLik) %>%
+  mutate(`p ChiSq`=round(`p ChiSq`,4),
+         AIC=round(AIC,2),
+         Chisq=round(Chisq,2),
+         df=2,
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Intercept Random Effects Variable`=round(`Intercept Random Effects Variable`,2),
+         `Linear age Est`=round(`Linear age Est`,2),
+         `Linear age SE`=round(`Linear age SE`,2),
+         `Quadratic age Est`=round(`Quadratic age Est`,2),
+         `Quadratic age SE`=round(`Quadratic age SE`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2),
+         `Linear age X Connectivity Est`=round(`Linear age X Connectivity Est`,2),
+         `Linear age X Connectivity SE`=round(`Linear age X Connectivity SE`,2))
+
+quadint <- filter(desikan_models_table, modtype=="quadratic interaction") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_quadint)) %>%
+  spread(param,value) %>% select(-df, -BIC, -logLik) %>%
+  mutate(`p ChiSq`=round(`p ChiSq`,4),
+         AIC=round(AIC,2),
+         Chisq=round(Chisq,2),
+         df=2,
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Intercept Random Effects Variable`=round(`Intercept Random Effects Variable`,2),
+         `Linear age Est`=round(`Linear age Est`,2),
+         `Linear age SE`=round(`Linear age SE`,2),
+         `Quadratic age Est`=round(`Quadratic age Est`,2),
+         `Quadratic age SE`=round(`Quadratic age SE`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2),
+         `Quadratic age X Connectivity Est`=round(`Quadratic age X Connectivity Est`,2),
+         `Quadratic age X Connectivity SE`=round(`Quadratic age X Connectivity SE`,2))
+
+alleffects <-bind_rows(linint,maineffect,quadint,coionly)
+
+
+
+Results_Table<-alleffects %>%
+  mutate(`Best Fit Model`=modtype,
+         LR=paste0("X2(",df,") = ",Chisq,", p = ",`p ChiSq`),
+         `AIC difference`=AIC,
+         `Intercept`=paste0(`Intercept Est`," (",`Intercept SE`,")"),
+         `Linear age`=paste0(`Linear age Est`," (",`Linear age SE`,")"),
+         `Quadratic age`=paste0(`Quadratic age Est`," (",`Quadratic age SE`,")"),
+         `Connectivity`=paste0(`Connectivity Est`," (", `Connectivity SE`,")"),
+         `Linear age X Connectivity`=paste0(`Linear age X Connectivity Est`,
+                                                " (", `Linear age X Connectivity SE`,")"),
+         `Qudratic age X Connectivity`=paste0(`Quadratic age X Connectivity Est`,
+                                                " (", `Quadratic age X Connectivity SE`,")")) %>%
+  select(-`Intercept SE`,-`Linear age SE`,-`Quadratic age SE`,-`Quadratic age X Connectivity SE`,
+         -`Linear age X Connectivity SE`,-`Connectivity SE`,-`p ChiSq`,-modtype,-AIC,-Chisq,
+         -`Intercept Random Effects Variable`,-df,-`Intercept Est`,-`Linear age Est`,
+         -`Quadratic age Est`,-`Connectivity Est`,-`Linear age X Connectivity Est`,
+         -`Quadratic age X Connectivity Est`)
+
+write.csv(Results_Table,paste0(getwd(),"/../tables/results_sample1.csv"))
+```
+
+Make results table for Sample 2
+```{r}
+options(scipen=999)
+param_labels_coionly <- {c(
+  "Res.Df"="Res df",
+  "RSS"="RSS",
+  "Df"="Df",
+  "Sum of Sq"="Sum of Sq",
+  "F"="F",
+  "Pr(>F)"="Pr(>F)",
+  "fstatval"="Fstat",
+  "numdf"="numdf",
+  "dendf"="dendf",
+  "adjRsq"="adjRsq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "cor_Estimate"="Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "cor_Std. Error"="Connectivity SE"
+  )}
+param_labels_maineffect <- {c(
+  "Res.Df"="Res df",
+  "RSS"="RSS",
+  "Df"="Df",
+  "Sum of Sq"="Sum of Sq",
+  "F"="F",
+  "Pr(>F)"="Pr(>F)",
+  "fstatval"="Fstat",
+  "numdf"="numdf",
+  "dendf"="dendf",
+  "adjRsq"="adjRsq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "AUCagecent_Estimate"="Linear age Est",
+  "cor_Estimate"="Connectivity Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "AUCagecent_Std. Error"="Linear age SE",
+  "cor_Std. Error"="Connectivity SE"
+)}
+param_labels_lininteraction <- {c(
+  "Res.Df"="Res df",
+  "RSS"="RSS",
+  "Df"="Df",
+  "Sum of Sq"="Sum of Sq",
+  "F"="F",
+  "Pr(>F)"="Pr(>F)",
+  "fstatval"="Fstat",
+  "numdf"="numdf",
+  "dendf"="dendf",
+  "adjRsq"="adjRsq",
+  "(Intercept)_Estimate"="Intercept Est",
+  "cor_Estimate"="Connectivity Est",
+  "AUCagecent_Estimate"="Linear age Est",
+  "(Intercept)_Std. Error"="Intercept SE",
+  "AUCagecent_Std. Error"="Linear age SE",
+  "cor_Std. Error"="Connectivity SE",
+  "AUCagecent:cor_Estimate"="Linear age X Connectivity Est",
+  "AUCagecent:cor_Std. Error"="Linear age X Connectivity SE"
+)}
+
+
+
+coionly <- filter(desikan_models_table_sample2, modtype=="coi only") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_coionly)) %>%
+  spread(param,value) %>%
+  mutate(`Fstat`=round(`Fstat`,2),
+         `Pr(>F)`=round(`Pr(>F)`,4),
+         `numdf`=round(`numdf`,0),
+         `dendf`=round(`dendf`,0),
+         `adjRsq`=round(`adjRsq`,2),
+         RSS=round(RSS,2),
+         `Res df`=round(`Res df`,0),
+         Df=round(Df,0),
+         modtype="coi only",
+         `Sum of Sq`=round(`Sum of Sq`,2),
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2))
+
+maineffect <-filter(desikan_models_table_sample2, modtype=="main effect") %>%
+  mutate(param=factor(param, levels=unique(param), labels=param_labels_maineffect)) %>%
+  spread(param,value) %>%
+  mutate(`Fstat`=round(`Fstat`,2),
+         `numdf`=round(`numdf`,0),
+         `dendf`=round(`dendf`,0),
+         `adjRsq`=round(`adjRsq`,2),
+         `Pr(>F)`=round(`Pr(>F)`,4),
+         RSS=round(RSS,2),
+         `Res df`=round(`Res df`,0),
+         Df=round(Df,0),
+         modtype="main effect",
+         `Sum of Sq`=round(`Sum of Sq`,2),
+         `Intercept Est`=round(`Intercept Est`,2),
+         `Intercept SE`=round(`Intercept SE`,2),
+         `Connectivity Est`=round(`Connectivity Est`,2),
+         `Connectivity SE`=round(`Connectivity SE`,2),
+         `Linear age Est`=round(`Linear age Est`,2),
+         `Linear age SE`=round(`Linear age SE`,2))
+{
+# linint <- filter(desikan_models_table_sample2, modtype=="linear interaction") %>%
+#   mutate(param=factor(param, levels=unique(param), labels=param_labels_lininteraction)) %>%
+#   spread(param,value) %>%
+#   mutate(`Fstat`=round(`Fstat`,2),
+#          `numdf`=round(`numdf`,0),
+#          `dendf`=round(`dendf`,0),
+#          `adjRsq`=round(`adjRsq`,2),
+#          `Pr(>F)`=round(`Pr(>F)`,4),
+#          RSS=round(RSS,2),
+#          `Res df`=round(`Res df`,0),
+#          Df=round(Df,0),
+#          modtype="linear interaction",
+#          `Sum of Sq`=round(`Sum of Sq`,2),
+#          `Intercept Est`=round(`Intercept Est`,2),
+#          `Intercept SE`=round(`Intercept SE`,2),
+#          `Connectivity Est`=round(`Connectivity Est`,2),
+#          `Connectivity SE`=round(`Connectivity SE`,2),
+#          `Linear age Est`=round(`Linear age Est`,2),
+#          `Linear age SE`=round(`Linear age SE`,2),
+#          `Linear age X Connectivity Est`=round(`Linear age X Connectivity Est`,2),
+#          `Linear age X Connectivity SE`=round(`Linear age X Connectivity SE`,2))
+  }
+
+alleffects <-bind_rows(maineffect,coionly)
+
+# Make tables #
+Results_Table_Sample2<-alleffects %>%
+  mutate(`Best Fit Model`=modtype,
+         `F test`=paste0("F",numdf,",",dendf," = ",Fstat,", p = ",`Pr(>F)`),
+         `adj R Sq`=paste0(`adjRsq`),
+         `Intercept`=paste0(`Intercept Est`," (",`Intercept SE`,")"),
+         `Linear age`=paste0(`Linear age Est`," (",`Linear age SE`,")"),
+         `Connectivity`=paste0(`Connectivity Est`," (", `Connectivity SE`,")")) %>%
+  select(-`Intercept SE`,-`Linear age SE`,-`Intercept Est`,-`Linear age Est`,
+         -`Connectivity Est`,-`Connectivity SE`,-F,-`numdf`,-`Res df`,-Df,-RSS,
+         -`Sum of Sq`,-Fstat,-dendf,-`Pr(>F)`,-adjRsq,-modtype)
+
+write.csv(Results_Table_Sample2,paste0(getwd(),"/../tables/results_sample2.csv"))
+```
